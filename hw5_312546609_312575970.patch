@@ -1,0 +1,435 @@
+diff --git a/defs.h b/defs.h
+index 82fb982..5e2567c 100644
+--- a/defs.h
++++ b/defs.h
+@@ -120,6 +120,8 @@ void            userinit(void);
+ int             wait(void);
+ void            wakeup(void*);
+ void            yield(void);
++int             set_priority(int);
++int             wait2(int *, int *, int *, int *);
+ 
+ // swtch.S
+ void            swtch(struct context**, struct context*);
+diff --git a/fairness.c b/fairness.c
+index 8b41aaf..92b2692 100644
+--- a/fairness.c
++++ b/fairness.c
+@@ -5,6 +5,7 @@
+ 
+ ////////////////{{ FAKE functions.
+ // Remove these functions before implementing your own real code
++/*
+ int
+ wait2(int *retime, int *rutime, int *stime, int* elapsed)
+ {
+@@ -16,6 +17,7 @@ int set_priority(int prio)
+ {
+     return 0;
+ }
++ */
+ ////////////////////////////////// }}
+ 
+ 
+diff --git a/proc.c b/proc.c
+index ce5d4eb..f74d772 100644
+--- a/proc.c
++++ b/proc.c
+@@ -214,6 +214,14 @@ fork(void)
+ 
+   pid = np->pid;
+ 
++  np->ctime = ticks;
++  np->retime = 0;
++  np->rutime = 0;
++  np->stime = 0;
++  np->priority = 2;
++
++  np->last_start_run_time = ticks;
++
+   acquire(&ptable.lock);
+ 
+   np->state = RUNNABLE;
+@@ -312,6 +320,77 @@ wait(void)
+     sleep(curproc, &ptable.lock);  //DOC: wait-sleep
+   }
+ }
++
++// check if proc finished its slice: return 1 if completed, otherwise 0
++static int finished_timeslice(struct proc *p)
++{
++    switch (p->priority)
++    {
++        case 1:
++            return (p->rutime % 32 == 0)? 1: 0;
++
++        case 2:
++            return (p->rutime % 16 == 0)? 1: 0;
++
++        case 3:
++            return (p->rutime % 8 == 0)? 1: 0;
++    }
++
++    // should not get here
++    return 1;
++}
++
++// compare two process to find who should be more prioritize to get the cpu
++static struct proc *get_prio_proc(struct proc *p1, struct proc *p2)
++{
++    if (p1 == 0)
++        return p2;
++
++    if (p2 == 0)
++        return p1;
++
++    if (p1->priority > p2->priority)
++        return p1;
++
++    if (p1->priority < p2->priority)
++        return p2;
++
++    // both have same priority
++
++    // priority 0, special case: At level 0 it executes the process until completion
++    if (p1->priority == 0)
++        return (p1->ctime < p2->ctime)? p1: p2;
++
++    // if not completed time slice, should get priority
++    int p1_finish = finished_timeslice(p1);
++    int p2_finish = finished_timeslice(p2);
++    if (p1_finish != p2_finish)
++        return p1_finish? p2: p1;
++
++    // The proc that get last the cpu, will need to wait ...
++    if (p1->last_start_run_time <= p2->last_start_run_time)
++        return p1;
++
++    return p2;
++}
++
++static struct proc *get_next_proc_to_run()
++{
++    struct proc *pMax = 0;
++    struct proc *p;
++
++    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
++    {
++        if (p->state != RUNNABLE)
++            continue;
++
++        pMax = get_prio_proc(pMax, p);
++    }
++
++    return pMax;
++}
++
++
+ //
+ //static void print_proc_stat(struct proc* p){
+ //  static int pid = 0;
+@@ -337,39 +416,45 @@ wait(void)
+ void
+ scheduler(void)
+ {
+-  struct proc *p;
+-  struct cpu *c = mycpu();
+-  c->proc = 0;
+-  
+-  for(;;){
+-    // Enable interrupts on this processor.
+-    sti();
+-
+-    // Loop over process table looking for process to run.
+-    acquire(&ptable.lock);
+-    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
+-      if(p->state != RUNNABLE)
+-        continue;
+-
+- 
+-            c->proc = p;
+-  //          print_proc_stat(p);
++    struct proc *p;
++    struct cpu *c = mycpu();
++    c->proc = 0;
++
++    for (;;)
++    {
++        // Enable interrupts on this processor.
++        sti();
++
++        // Loop over process table looking for process to run.
++        acquire(&ptable.lock);
++        p = get_next_proc_to_run();
++        if (p == 0)
++        {
++            release(&ptable.lock);
++            continue;
++        }
++
++        c->proc = p;
++        // print_proc_stat(p);
+ #ifdef COLLECT_PROC_TIMING
+-            // update our stats. This has to be done exactly once every TICK.
+-            p->rutime++;
++        // update our stats. This has to be done exactly once every TICK.
++        p->rutime++;
++        p->last_start_run_time = ticks;
++        // other stats are update when incrementing ticks in trap.c
+ #endif //COLLECT_PROC_TIMING
+-            switchuvm(p);
+-            p->state = RUNNING;
+ 
+-            swtch(&(c->scheduler), p->context);
+-            switchkvm();
++        switchuvm(p);
++        p->state = RUNNING;
+ 
+-            // Process is done running for now.
+-            // It should have changed its p->state before coming back.
+-            c->proc = 0;
+-       }
+-        release(&ptable.lock);
+ 
++        swtch(&(c->scheduler), p->context);
++        switchkvm();
++
++        // Process is done running for now.
++        // It should have changed its p->state before coming back.
++        c->proc = 0;
++
++        release(&ptable.lock);
+     }
+ }
+ 
+@@ -551,3 +636,83 @@ procdump(void)
+     cprintf("\n");
+   }
+ }
++
++int
++set_priority(int prio)
++{
++    if(prio < 0 || prio > 3)
++        return -1;
++
++    struct proc *p = myproc();
++    p->priority = prio;
++    return 0;
++}
++
++int
++wait2(int *retime, int *rutime, int *stime, int *elapsed)
++{
++    struct proc *p;
++    int havekids;
++    int pid;
++    acquire(&ptable.lock);
++    for(;;){
++        // Scan through table looking for zombie children.
++        havekids = 0;
++        for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++            if(p->parent != myproc())
++                continue;
++            havekids = 1;
++            if(p->state == ZOMBIE){
++                // Found one.
++                *retime = p->retime;
++                *rutime = p->rutime;
++                *stime = p->stime;
++                *elapsed = *retime + *rutime + *stime;
++                pid = p->pid;
++                kfree(p->kstack);
++                p->kstack = 0;
++                freevm(p->pgdir);
++                p->state = UNUSED;
++                p->pid = 0;
++                p->parent = 0;
++                p->name[0] = 0;
++                p->killed = 0;
++                p->ctime = 0;
++                p->retime = 0;
++                p->rutime = 0;
++                p->stime = 0;
++                p->priority = 2;
++                release(&ptable.lock);
++                return pid;
++            }
++        }
++
++        // No point waiting if we don't have any children.
++        if(!havekids || myproc()->killed){
++            release(&ptable.lock);
++            return -1;
++        }
++
++        // Wait for children to exit.  (See wakeup1 call in proc_exit.)
++        sleep(myproc(), &ptable.lock);  //DOC: wait-sleep
++    }
++}
++
++void updatestatistics() {
++    struct proc *p;
++    acquire(&ptable.lock);
++    for(p = ptable.proc; p < &ptable.proc[NPROC]; p++){
++        switch(p->state) {
++            case SLEEPING:
++                p->stime++;
++                break;
++            case RUNNABLE:
++                p->retime++;
++                break;
++
++            default:
++                ;
++        }
++    }
++    release(&ptable.lock);
++}
+\ No newline at end of file
+diff --git a/proc.h b/proc.h
+index 515ba68..62ec80f 100644
+--- a/proc.h
++++ b/proc.h
+@@ -57,6 +57,8 @@ struct proc {
+     int retime;
+     int rutime;
+     int priority; // the current priority of the process. Used to help with scheduling algorithm
++
++    int last_start_run_time;
+ };
+ 
+ // Process memory is laid out contiguously, low addresses first:
+@@ -64,3 +66,6 @@ struct proc {
+ //   original data and bss
+ //   fixed-size stack
+ //   expandable heap
++
++
++void updatestatistics();
+\ No newline at end of file
+diff --git a/set_priority.c b/set_priority.c
+deleted file mode 100644
+index 254a920..0000000
+--- a/set_priority.c
++++ /dev/null
+@@ -1,8 +0,0 @@
+-// this is a place holder for set_priority(int) that you have to implement.
+-// replace the content of this file with your implementation,
+-// or just delete it, and write the function where you want
+-
+-int set_priority(int prio){
+-   return 1;
+-}
+-
+diff --git a/syscall.c b/syscall.c
+index d2218c3..09694f9 100644
+--- a/syscall.c
++++ b/syscall.c
+@@ -103,6 +103,8 @@ extern int sys_unlink(void);
+ extern int sys_wait(void);
+ extern int sys_write(void);
+ extern int sys_uptime(void);
++extern int sys_set_priority(void);
++extern int sys_wait2(void);
+ extern int sys_halt(void);
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -126,6 +128,8 @@ static int (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_set_priority]   sys_set_priority,
++[SYS_wait2]   sys_wait2,
+ [SYS_halt]    sys_halt
+ };
+ 
+diff --git a/syscall.h b/syscall.h
+index 1dd7b9b..504d81b 100644
+--- a/syscall.h
++++ b/syscall.h
+@@ -20,4 +20,6 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_set_priority  22
++#define SYS_wait2  23
+ #define SYS_halt   50
+diff --git a/sysproc.c b/sysproc.c
+index 4fc95e9..76ac0d9 100644
+--- a/sysproc.c
++++ b/sysproc.c
+@@ -90,6 +90,37 @@ sys_uptime(void)
+   return xticks;
+ }
+ 
++int
++sys_set_priority(void) // int prio)
++{
++    int pr;
++
++    if(argint(0, &pr) < 0)
++        return -1;
++
++    return set_priority(pr);
++}
++
++int
++sys_wait2(void)// int *retime, int *rutime, int *stime, int* elapsed)
++{
++    int *retime, *rutime, *stime, *elapsed;
++
++    if (argptr(0, (void*)&retime, sizeof(retime)) < 0)
++        return -1;
++
++    if (argptr(1, (void*)&rutime, sizeof(rutime)) < 0)
++        return -1;
++
++    if (argptr(2, (void*)&stime, sizeof(stime)) < 0)
++        return -1;
++
++    if (argptr(3, (void*)&elapsed, sizeof(elapsed)) < 0)
++        return -1;
++
++    return wait2(retime, rutime, stime, elapsed);
++}
++
+ int
+ sys_halt(void)
+ {
+diff --git a/trap.c b/trap.c
+index 41c66eb..6f963d1 100644
+--- a/trap.c
++++ b/trap.c
+@@ -52,6 +52,7 @@ trap(struct trapframe *tf)
+       acquire(&tickslock);
+       ticks++;
+       wakeup(&ticks);
++      updatestatistics();
+       release(&tickslock);
+     }
+     lapiceoi();
+diff --git a/user.h b/user.h
+index 14f64db..ad00e9f 100644
+--- a/user.h
++++ b/user.h
+@@ -23,6 +23,8 @@ int getpid(void);
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int set_priority(int);
++int wait2(int *, int *, int *, int *);
+ int halt(void);
+ 
+ // ulib.c
+diff --git a/usys.S b/usys.S
+index 0d4eaed..31d07de 100644
+--- a/usys.S
++++ b/usys.S
+@@ -29,4 +29,6 @@ SYSCALL(getpid)
+ SYSCALL(sbrk)
+ SYSCALL(sleep)
+ SYSCALL(uptime)
++SYSCALL(set_priority)
++SYSCALL(wait2)
+ SYSCALL(halt)
