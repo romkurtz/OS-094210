@@ -1,0 +1,178 @@
+diff --git a/Makefile b/Makefile
+index d313f2f..7c38e6d 100644
+--- a/Makefile
++++ b/Makefile
+@@ -180,9 +180,9 @@ UPROGS=\
+ 	_stressfs\
+ 	_usertests\
+ 	_wc\
++	_lsof\
+ 	_zombie\
+ 	_open_files\
+-	_lsof
+ 
+ fs.img: mkfs README $(UPROGS)
+ 	./mkfs fs.img README $(UPROGS)
+@@ -251,7 +251,7 @@ qemu-nox-gdb: fs.img xv6.img .gdbinit
+ 
+ EXTRA=\
+ 	mkfs.c ulib.c user.h cat.c echo.c forktest.c grep.c kill.c\
+-	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c zombie.c\
++	ln.c ls.c mkdir.c rm.c stressfs.c usertests.c wc.c lsof.c zombie.c\
+ 	printf.c umalloc.c\
+ 	README dot-bochsrc *.pl toc.* runoff runoff1 runoff.list\
+ 	.gdbinit.tmpl gdbutil\
+diff --git a/defs.h b/defs.h
+index 82fb982..3c053fc 100644
+--- a/defs.h
++++ b/defs.h
+@@ -120,6 +120,7 @@ void            userinit(void);
+ int             wait(void);
+ void            wakeup(void*);
+ void            yield(void);
++int             lsof(void);
+ 
+ // swtch.S
+ void            swtch(struct context**, struct context*);
+diff --git a/lsof.c b/lsof.c
+index 007a487..858cd16 100644
+--- a/lsof.c
++++ b/lsof.c
+@@ -6,6 +6,6 @@
+ #include "user.h"
+ 
+ int main(){
+-    printf(1,"hello from lsof\n");
++    lsof();
+     exit();
+ }
+\ No newline at end of file
+diff --git a/proc.c b/proc.c
+index 806b1b1..c0e4e97 100644
+--- a/proc.c
++++ b/proc.c
+@@ -6,6 +6,9 @@
+ #include "x86.h"
+ #include "proc.h"
+ #include "spinlock.h"
++#include "sleeplock.h"
++#include "fs.h"
++#include "file.h"
+ 
+ struct {
+   struct spinlock lock;
+@@ -532,3 +535,45 @@ procdump(void)
+     cprintf("\n");
+   }
+ }
++
++
++int
++lsof()
++{
++	struct proc *p;
++	//enable interrupts on this processor
++	sti();
++	
++	//loop over process table looking for process with pid
++	acquire(&ptable.lock);
++	
++	cprintf("PID \t fd \t type \t read/write \t \n");
++	
++	for(p = ptable.proc; p < &ptable.proc[NPROC]; p++)
++	{
++			struct file *f;
++			
++			for(int fd = 0; fd < NOFILE; fd++)
++			{
++				f = p->ofile[fd];
++				if (f)
++				{
++					char *rw = "";
++					if (f->readable && f->writable) rw= "RW";
++					else if (f->readable) rw = "R";
++					else if (f->writable) rw = "W";
++					
++					if(f->type == FD_PIPE)
++						cprintf("%d \t %d \t pipe \t %s\n", p->pid, fd, rw);
++					else if(f->type == FD_INODE)
++						cprintf("%d \t %d \t regular \t %s\n", p->pid, fd, rw);
++					
++				}
++			} // end for files
++	} // end for process
++
++    release(&ptable.lock);
++
++	return 22;
++}
++	
+diff --git a/syscall.c b/syscall.c
+index d2218c3..368e02e 100644
+--- a/syscall.c
++++ b/syscall.c
+@@ -103,6 +103,7 @@ extern int sys_unlink(void);
+ extern int sys_wait(void);
+ extern int sys_write(void);
+ extern int sys_uptime(void);
++extern int sys_lsof(void);
+ extern int sys_halt(void);
+ static int (*syscalls[])(void) = {
+ [SYS_fork]    sys_fork,
+@@ -126,6 +127,7 @@ static int (*syscalls[])(void) = {
+ [SYS_link]    sys_link,
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
++[SYS_lsof]    sys_lsof,
+ [SYS_halt]    sys_halt
+ };
+ 
+diff --git a/syscall.h b/syscall.h
+index 1dd7b9b..b0b2679 100644
+--- a/syscall.h
++++ b/syscall.h
+@@ -20,4 +20,5 @@
+ #define SYS_link   19
+ #define SYS_mkdir  20
+ #define SYS_close  21
++#define SYS_lsof   22
+ #define SYS_halt   50
+diff --git a/sysproc.c b/sysproc.c
+index 4fc95e9..805062c 100644
+--- a/sysproc.c
++++ b/sysproc.c
+@@ -90,6 +90,12 @@ sys_uptime(void)
+   return xticks;
+ }
+ 
++int
++sys_lsof(void)
++{
++	return lsof();
++}
++
+ int
+ sys_halt(void)
+ {
+diff --git a/user.h b/user.h
+index 14f64db..af66777 100644
+--- a/user.h
++++ b/user.h
+@@ -23,6 +23,7 @@ int getpid(void);
+ char* sbrk(int);
+ int sleep(int);
+ int uptime(void);
++int lsof(void);
+ int halt(void);
+ 
+ // ulib.c
+diff --git a/usys.S b/usys.S
+index 0d4eaed..66a0e73 100644
+--- a/usys.S
++++ b/usys.S
+@@ -29,4 +29,5 @@ SYSCALL(getpid)
+ SYSCALL(sbrk)
+ SYSCALL(sleep)
+ SYSCALL(uptime)
++SYSCALL(lsof)
+ SYSCALL(halt)
